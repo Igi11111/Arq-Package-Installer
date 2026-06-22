@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=ArqOS Package Manager
+Comment=Manage packages from arq-repo
+Exec=arq-pkg-manager
+Icon=arq-pkg-manager
+Terminal=false
+Type=Application
+Categories=System;PackageManager;
+Keywords=pacman;packages;arq;arqos;
+StartupWMClass=arq-pkg-manager
