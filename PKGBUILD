@@ -1,6 +1,6 @@
 # Maintainer: Igi <igi@arqos>
 pkgname=arq-pkg-manager
-pkgver=1.0.0
+pkgver=1.1
 pkgrel=3
 pkgdesc="Graphical package manager for ArqOS — arq-repo repository (GTK4/Python)"
 arch=('any')
