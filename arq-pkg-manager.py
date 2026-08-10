@@ -3,7 +3,7 @@
 arq-pkg-manager — graphical package manager for ArqOS (arq-repo repository)
 Requires: python-gobject, gtk4, polkit
 """
-import gi, subprocess, threading, os, re
+import gi, subprocess, threading, os, re, json
 gi.require_version("Gtk","4.0")
 from gi.repository import Gtk, GLib, Pango, Gio
 
@@ -11,6 +11,9 @@ REPO = "arq-repo"
 APP_ID = "org.arqos.PkgManager"
 TASKBAR_ICON = "arq-pkg-manager"
 HEADER_ICON  = "arq-pkg-manager-logo"
+PACMAN_CONF  = "/etc/pacman.conf"
+CONFIG_DIR   = os.path.expanduser("~/.config/arq-pkg-manager")
+CONFIG_FILE  = os.path.join(CONFIG_DIR, "settings.json")
 
 # Available kernels: (display name, pacman pkg, headers pkg, description)
 KERNELS = [
@@ -37,8 +40,48 @@ def run_cmd(cmd, timeout=60):
     except Exception as e:
         return "", str(e), 1
 
-def get_repo_packages():
-    out, _, _ = run_cmd(["pacman", "-Slq", REPO])
+def get_pacman_repos():
+    """Parse /etc/pacman.conf and return the list of repository names
+    (section headers other than [options]), in file order."""
+    repos = []
+    try:
+        with open(PACMAN_CONF, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                m = re.match(r"^\[([^\]]+)\]$", line)
+                if m and m.group(1) != "options":
+                    repos.append(m.group(1))
+    except OSError:
+        pass
+    return repos
+
+def load_settings():
+    """Return dict of settings. Falls back to sane defaults if the
+    config file doesn't exist yet or is invalid."""
+    defaults = {"repos": [REPO]}
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("repos"), list) and data["repos"]:
+            return {"repos": data["repos"]}
+    except (OSError, ValueError):
+        pass
+    return defaults
+
+def save_settings(settings):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(settings, f, indent=2)
+        return True
+    except OSError:
+        return False
+
+def get_repo_packages(repos=None):
+    repos = repos if repos else [REPO]
+    out, _, _ = run_cmd(["pacman", "-Slq"] + repos)
     return [l.strip() for l in out.splitlines() if l.strip()]
 
 def get_installed():
@@ -92,6 +135,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.installed = {}
         self.updates = set()
         self.filter_mode = "all"
+        self.available_repos = get_pacman_repos()
+        settings = load_settings()
+        # keep only repos that still exist in pacman.conf; fall back to REPO
+        self.enabled_repos = [r for r in settings["repos"] if r in self.available_repos] \
+            or ([REPO] if REPO in self.available_repos else self.available_repos[:1])
         self._build_ui()
         self._load_packages()
 
@@ -143,8 +191,9 @@ class MainWindow(Gtk.ApplicationWindow):
         hdr.append(logo)
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         t1 = Gtk.Label(label="ArqOS Package Manager"); t1.add_css_class("title-label"); t1.set_halign(Gtk.Align.START)
-        t2 = Gtk.Label(label=f"repository: {REPO}");   t2.add_css_class("subtitle-label"); t2.set_halign(Gtk.Align.START)
-        titles.append(t1); titles.append(t2)
+        self.repo_subtitle = Gtk.Label(label=self._repo_subtitle_text())
+        self.repo_subtitle.add_css_class("subtitle-label"); self.repo_subtitle.set_halign(Gtk.Align.START)
+        titles.append(t1); titles.append(self.repo_subtitle)
         hdr.append(titles)
         root.append(hdr)
         root.append(Gtk.Separator())
@@ -154,9 +203,20 @@ class MainWindow(Gtk.ApplicationWindow):
         nb.set_margin_start(0); nb.set_margin_end(0)
         nb.set_vexpand(True)
         root.append(nb)
+        self.nb = nb
 
         nb.append_page(self._build_packages_tab(), Gtk.Label(label="📦  Packages"))
         nb.append_page(self._build_kernels_tab(),  Gtk.Label(label="🐧  Kernels"))
+        self.settings_page_index = nb.get_n_pages()
+        nb.append_page(self._build_settings_tab(), Gtk.Label(label="⚙  Settings"))
+
+    def _repo_subtitle_text(self):
+        n = len(self.enabled_repos)
+        if n == 0:
+            return "repository: none selected"
+        if n == 1:
+            return f"repository: {self.enabled_repos[0]}"
+        return f"repositories: {', '.join(self.enabled_repos)}"
 
     # ── PACKAGES TAB ─────────────────────────────────────────────────────────
 
@@ -320,6 +380,104 @@ class MainWindow(Gtk.ApplicationWindow):
         self.bl_lbl.set_label(labels.get(bl, labels["unknown"]))
         self._bootloader = bl
 
+    # ── SETTINGS TAB ─────────────────────────────────────────────────────────
+
+    def _build_settings_tab(self):
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        sw = Gtk.ScrolledWindow(); sw.set_vexpand(True)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        content.set_margin_start(16); content.set_margin_end(16)
+        content.set_margin_top(14);   content.set_margin_bottom(14)
+        sw.set_child(content)
+        outer.append(sw)
+
+        info = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        info.add_css_class("info-box")
+        ico = Gtk.Image.new_from_icon_name("dialog-information-symbolic"); ico.set_pixel_size(18)
+        lbl = Gtk.Label(label=f"Repositories are read from {PACMAN_CONF}. Choose which of them "
+                               f"this app should list and manage packages from.")
+        lbl.set_wrap(True); lbl.set_halign(Gtk.Align.START); lbl.set_hexpand(True)
+        lbl.add_css_class("subtitle-label")
+        info.append(ico); info.append(lbl)
+        content.append(info)
+
+        sec = Gtk.Label(label="Active repositories"); sec.add_css_class("section-title"); sec.set_halign(Gtk.Align.START)
+        content.append(sec)
+
+        repo_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        repo_list.add_css_class("boxed-list")
+        self.settings_checks = {}
+
+        if not self.available_repos:
+            empty = Gtk.Label(label=f"No repositories found in {PACMAN_CONF}.")
+            empty.add_css_class("subtitle-label"); empty.set_halign(Gtk.Align.START)
+            content.append(empty)
+        else:
+            for repo in self.available_repos:
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+                row.set_margin_start(10); row.set_margin_end(10); row.set_margin_top(8); row.set_margin_bottom(8)
+                chk = Gtk.CheckButton()
+                chk.set_active(repo in self.enabled_repos)
+                chk.connect("toggled", self._on_repo_toggle, repo)
+                row.append(chk)
+                nm = Gtk.Label(label=repo); nm.set_halign(Gtk.Align.START); nm.set_hexpand(True)
+                attr = Pango.AttrList(); attr.insert(Pango.attr_family_new("monospace")); nm.set_attributes(attr)
+                row.append(nm)
+                if repo == REPO:
+                    badge = Gtk.Label(label="default"); badge.add_css_class("badge-avl")
+                    row.append(badge)
+                repo_list.append(row)
+                self.settings_checks[repo] = chk
+            content.append(repo_list)
+
+        self.settings_status = Gtk.Label(label="")
+        self.settings_status.set_halign(Gtk.Align.START); self.settings_status.add_css_class("subtitle-label")
+        content.append(self.settings_status)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_reload = Gtk.Button(label="↺ Reload from pacman.conf")
+        btn_reload.connect("clicked", self._on_reload_repos)
+        btn_row.append(btn_reload)
+        content.append(btn_row)
+
+        return outer
+
+    def _on_repo_toggle(self, chk, repo):
+        if chk.get_active():
+            if repo not in self.enabled_repos:
+                self.enabled_repos.append(repo)
+        else:
+            if repo in self.enabled_repos:
+                self.enabled_repos.remove(repo)
+
+        # keep at least one repo selected — re-check the box the user just cleared
+        if not self.enabled_repos:
+            self.enabled_repos.append(repo)
+            chk.set_active(True)
+            self.settings_status.set_label("At least one repository must stay selected.")
+            return
+
+        save_settings({"repos": self.enabled_repos})
+        self.repo_subtitle.set_label(self._repo_subtitle_text())
+        self.settings_status.set_label("Saved. Reloading package list…")
+        self._load_packages()
+
+    def _on_reload_repos(self, _):
+        self.available_repos = get_pacman_repos()
+        self.enabled_repos = [r for r in self.enabled_repos if r in self.available_repos] \
+            or ([REPO] if REPO in self.available_repos else self.available_repos[:1])
+        save_settings({"repos": self.enabled_repos})
+        self.repo_subtitle.set_label(self._repo_subtitle_text())
+
+        # rebuild the settings tab from scratch so newly-added repos show up too
+        idx = self.settings_page_index
+        self.nb.remove_page(idx)
+        new_page = self._build_settings_tab()
+        self.nb.insert_page(new_page, Gtk.Label(label="⚙  Settings"), idx)
+        self.nb.set_current_page(idx)
+        self.settings_status.set_label(f"Reloaded {len(self.available_repos)} repositories from {PACMAN_CONF}.")
+        self._load_packages()
+
     # ── shared terminal ───────────────────────────────────────────────────────
 
     def _build_terminal(self):
@@ -447,7 +605,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _load_packages(self):
         def worker():
-            pkgs = get_repo_packages()
+            pkgs = get_repo_packages(self.enabled_repos)
             inst = get_installed()
             upds = get_updates()
             GLib.idle_add(self._on_loaded, pkgs, inst, upds)

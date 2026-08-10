@@ -3,12 +3,12 @@
 pkgname = arq-pkg-manager
 pkgbase = arq-pkg-manager
 xdata = pkgtype=pkg
-pkgver = 1.1-3
+pkgver = 1.2-1
 pkgdesc = Graphical package manager for ArqOS — arq-repo repository (GTK4/Python)
 url = https://github.com/Igi11111/ArqOS
-builddate = 1782476711
+builddate = 1786357516
 packager = Unknown Packager
-size = 467326
+size = 474561
 arch = any
 license = GPL3
 depend = python
